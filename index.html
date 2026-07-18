@@ -6,7 +6,7 @@
   <title>Smart Video Compressor Pro - Compress Videos Without Losing Quality</title>
   
   <!-- PWA Manifest -->
-  <link rel="manifest" href="manifest.json">
+  <link rel="manifest" href="manifest.json" crossorigin="anonymous">
   <meta name="theme-color" content="#6366f1">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -16,10 +16,11 @@
   <meta name="description" content="Free premium, browser-native AI Smart Video Compressor Web App. Compress, crop, trim, and convert videos directly in your browser with zero upload limits. Safe, offline-ready, and ultra-fast.">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2'%3E%3Cpath d='m22 8-6 4 6 4V8Z'/%3E%3Crect width='14' height='12' x='2' y='6' rx='2' ry='2'/%3E%3Cpath d='M6 12h6'/%3E%3Cpath d='M9 9v6'/%3E%3C/svg%3E">
   
-  <!-- Google Fonts -->
+  <!-- Google Fonts (non-blocking) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"></noscript>
   
   <!-- CSS Styles -->
   <style>
@@ -3157,12 +3158,17 @@
     };
 
     // Initialize application
-    document.addEventListener('DOMContentLoaded', () => {
+    function initApp() {
       initTheme();
       initEventListeners();
       loadHistoryFromStorage();
       updateStorageUsageLabel();
-    });
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initApp);
+    } else {
+      initApp();
+    }
 
     // Helper functions for UI switching
     function switchScreen(screenName) {
@@ -5384,12 +5390,10 @@
       document.getElementById('lbl-storage-usage').innerText = `Index Cache Size: ${formatFileSize(size)}`;
     }
 
-    // --- SPLASH SCREEN ---
-    window.addEventListener('load', () => {
-      setTimeout(() => {
-        document.getElementById('splash-screen').classList.add('hidden');
-      }, 1400);
-    });
+    // --- SPLASH SCREEN (guaranteed dismissal) ---
+    setTimeout(() => {
+      document.getElementById('splash-screen').classList.add('hidden');
+    }, 1500);
 
     // --- TOAST NOTIFICATION SYSTEM ---
     function showToast(type, title, message, duration = 4000) {
@@ -5524,7 +5528,7 @@
     });
 
     // --- SERVICE WORKER REGISTRATION (PWA) ---
-    if ('serviceWorker' in navigator) {
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('sw.js').catch(() => {});
       });
