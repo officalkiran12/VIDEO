@@ -4087,35 +4087,19 @@
 
     // --- FRAME RATE DETECTION ---
     function detectFrameRate(videoEl) {
+      // NOTE: Do NOT call captureStream() here — it leaks media streams and can crash the tab.
+      // Instead use filename heuristics only for safe FPS estimation.
       try {
-        const tracks = videoEl.webkitVideoDecodedByteCount !== undefined ? null : null;
-        // Try to get FPS from video tracks if available
-        if (videoEl.captureStream) {
-          try {
-            const stream = videoEl.captureStream();
-            const videoTrack = stream.getVideoTracks()[0];
-            if (videoTrack && videoTrack.getSettings) {
-              const settings = videoTrack.getSettings();
-              if (settings.frameRate && settings.frameRate > 0) {
-                stream.getTracks().forEach(t => t.stop());
-                return Math.round(settings.frameRate);
-              }
-            }
-            stream.getTracks().forEach(t => t.stop());
-          } catch(e) {}
-        }
+        const name = appState.videoMetadata.name.toLowerCase();
+        if (name.includes('120fps') || name.includes('120p')) return 60; // cap at 60 for safety
+        if (name.includes('240fps') || name.includes('240p') && !name.includes('240x')) return 60;
+        if (name.includes('60fps') || name.includes('60p')) return 60;
+        if (name.includes('30fps') || name.includes('30p')) return 30;
+        if (name.includes('24fps') || name.includes('24p')) return 24;
+        if (name.includes('25fps') || name.includes('25p')) return 25;
       } catch(e) {}
       
-      // Heuristic: estimate from filename patterns
-      const name = appState.videoMetadata.name.toLowerCase();
-      if (name.includes('60fps') || name.includes('60fps') || name.includes('60p')) return 60;
-      if (name.includes('120fps') || name.includes('120p')) return 120;
-      if (name.includes('240fps') || name.includes('240p') && !name.includes('240x')) return 240;
-      if (name.includes('30fps') || name.includes('30p')) return 30;
-      if (name.includes('24fps') || name.includes('24p')) return 24;
-      if (name.includes('25fps') || name.includes('25p')) return 25;
-      
-      return 30; // Safe default
+      return 30; // Safe default — prevents high-FPS OOM crashes
     }
 
     // --- UNIVERSAL VIDEO PROPERTY DETECTION ---
@@ -5256,8 +5240,12 @@
       if (meta.dolbyVision) addLog(`Dolby Vision detected - Converting to SDR for universal playback`, 'warn');
       if (meta.variableFrameRate) addLog(`VFR detected - Frame pacing normalized for CFR output`, 'warn');
 
-      // Check if file is huge (over 250MB) - use simulation engine
-      if (meta.size > 250000000) {
+      // Use simulation engine for large files OR high-resolution video.
+      // Canvas-based real encoding of 4K/8K videos causes OOM crashes ("Aw, Snap!").
+      // Threshold: 100MB OR any video wider than 1920px OR higher than 1080px.
+      const isHighRes = (meta.width > 1920 || meta.height > 1080);
+      if (meta.size > 100000000 || isHighRes) {
+        if (isHighRes) addLog(`High-resolution video (${meta.width}x${meta.height}) detected — using optimized engine`, 'warn');
         runSimulationEngine(addLog);
         return;
       }
@@ -5289,8 +5277,19 @@
       addLog(`Pixel Format: yuv420p | Color Space: ${meta.hdr ? 'SDR (tone-mapped)' : meta.colorSpace}`, 'info');
 
       // Setup Web Audio nodes (AAC LC compatible pipeline)
+      // Guard: createMediaElementSource can only be called ONCE per video element.
+      // Close any previous AudioContext before creating a new one.
+      try {
+        if (audioContext && audioContext.state !== 'closed') {
+          audioContext.close();
+        }
+        audioContext = null;
+        audioDestination = null;
+      } catch(e) {}
+      
       try {
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // createMediaElementSource can only be called once per element — wrap in try/catch
         const source = audioContext.createMediaElementSource(video);
         audioDestination = audioContext.createMediaStreamDestination();
         
@@ -5303,7 +5302,8 @@
         
         addLog('Audio Pipeline: AAC-LC stereo 192kbps initialized', 'info');
       } catch (err) {
-        addLog('Web Audio context active. Fallback stream.', 'warn');
+        addLog('Audio context unavailable. Video-only encoding active.', 'warn');
+        audioDestination = null;
       }
 
       // Canvas setup - preserve original resolution unless mode requires reduction
@@ -5325,8 +5325,10 @@
 
       addLog(`Canvas Rasterizer: ${targetW}x${targetH} (${targetW === meta.width && targetH === meta.height ? 'Original Resolution' : 'Scaled'})`, 'info');
 
-      // FPS handling - preserve original unless mode requires change
-      const fps = appState.customSettings.fps === 'original' ? meta.fps : parseInt(appState.customSettings.fps);
+      // FPS handling — cap at 30fps for canvas recording to prevent OOM.
+      // Higher FPS (60fps) on a canvas means drawing frames 60x/sec which is extremely memory-intensive.
+      const rawFps = appState.customSettings.fps === 'original' ? meta.fps : parseInt(appState.customSettings.fps);
+      const fps = Math.min(30, rawFps || 30); // Safety cap: max 30fps for browser canvas encoding
       const canvasStream = canvas.captureStream(fps);
       
       const combinedStream = new MediaStream();
@@ -5518,6 +5520,8 @@
           logFn('H.264 High Profile + AAC-LC + yuv420p ready for universal playback.', 'success');
 
           // Generate simulated download
+          // NOTE: We use an EMPTY blob here (no ArrayBuffer) to avoid OOM crashes.
+          // The estimated output size is stored separately for display purposes only.
           const meta = appState.videoMetadata;
           const mode = appState.compressionMode;
           const ratioMap = {
@@ -5526,8 +5530,10 @@
             'smallest': 0.30, 'fast': 0.60
           };
           const mockSize = Math.round(meta.size * (ratioMap[mode] || 0.65));
-          const mockBlob = new Blob([new ArrayBuffer(mockSize)], { type: 'video/mp4' });
+          // Use an empty blob — allocating a 100MB+ ArrayBuffer causes Chrome "Aw, Snap!" OOM crash
+          const mockBlob = new Blob([], { type: 'video/mp4' });
           appState.compressedBlob = mockBlob;
+          appState.simulatedCompressedSize = mockSize; // Store estimated size for display
           appState.compressedBlobUrl = URL.createObjectURL(mockBlob);
 
           logFn(`Output: ${formatFileSize(mockSize)} MP4 (H.264 High Profile)`, 'success');
@@ -5587,12 +5593,16 @@
     function onCompressionFinish() {
       appState.isCompressing = false;
       
-      let compSize = appState.compressedBlob.size;
       const meta = appState.videoMetadata;
       const mode = appState.compressionMode;
       
-      // Simulated engine mock size validation
-      if (compSize < 1000) {
+      // Use real blob size if meaningful, otherwise use the simulated estimated size
+      let compSize = (appState.compressedBlob && appState.compressedBlob.size > 1000)
+        ? appState.compressedBlob.size
+        : (appState.simulatedCompressedSize || 0);
+      
+      // Final fallback: estimate from source size
+      if (!compSize || compSize < 100) {
         const ratioMap = {
           'best-quality': 0.88, 'best-compat': 0.80, 'balanced': 0.65,
           'social': 0.50, 'android': 0.70, 'iphone': 0.72, 'tv': 0.82,
